@@ -1,0 +1,9 @@
+[build]
+target = "riscv64gc-unknown-none-elf"
+
+[target.riscv64gc-unknown-none-elf]
+rustflags = [
+    "-C", "link-arg=-Tboard/qemu-virt/linker.ld",
+    "-C", "force-frame-pointers=yes",
+]
+runner = "qemu-system-riscv64 -machine virt -nographic -bios none -kernel"

@@ -1,0 +1,13 @@
+[package]
+name = "kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[features]
+default = ["serial-uart16550"]
+serial-uart16550 = []
+serial-usart-stm32 = []
