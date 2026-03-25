@@ -33,23 +33,23 @@ const LSR: usize = 0x05;
 // Bit 5 of LSR — Transmit Empty flag.
 // When this bit is 1, the transmit buffer is ready to accept a new byte to send.
 // We spin on this bit in putc() before writing to THR.
-const LSR_TX_EMPTY: u8 = 1 << 5; // 0b00100000 = 0x20
+const LSR_TX_EMPTY: u8 = 0b0000_0001 << 5;
 
 // Bit 0 of LSR — Receive Ready flag.
 // When this bit is 1, a byte has arrived and is waiting to be read from RBR.
 // We spin on this bit in getc() before reading from RBR.
-const LSR_RX_READY: u8 = 1 << 0; // 0b00000001 = 0x01
+const LSR_RX_READY: u8 = 0b0000_0001 << 0;
 
 // LCR value for 8-bit word length, no parity, 1 stop bit (the most common serial format).
 // Bits [1:0] of LCR control word length: 0b11 = 8 bits.
 // This also clears the DLAB bit (bit 7 = 0), switching back to normal register mode.
-const LCR_8BIT: u8 = 0b11;
+const LCR_8BIT: u8 = 0b0000_0011;
 
 // Bit 7 of LCR — Divisor Latch Access Bit.
 // When set to 1, offsets 0x00 and 0x01 switch from THR/RBR/IER to the baud rate
 // divisor registers (DLL and DLH), allowing you to configure the baud rate.
 // Must be cleared back to 0 before normal data transmission/reception.
-const LCR_DLAB: u8 = 1 << 7; // 0b10000000 = 0x80
+const LCR_DLAB: u8 = 0b0000_0001 << 7;
 
 pub fn init() {
     unsafe {
@@ -125,5 +125,22 @@ pub fn getc() -> u8 {
         let base = UART_BASE as *mut u8;
         while (read_volatile(base.add(LSR)) & LSR_RX_READY) == 0 {}
         read_volatile(base.add(RBR))
+    }
+}
+
+/// Non-blocking byte read.
+///
+/// Returns `Some(byte)` if a byte is available in the UART receive buffer,
+/// `None` if no data is ready. Does not spin/block.
+pub fn try_getc() -> Option<u8> {
+    // SAFETY: UART_BASE MMIO is always accessible in M-mode. read_volatile
+    // ensures the compiler does not elide or reorder the hardware register read.
+    unsafe {
+        let base = UART_BASE as *mut u8;
+        if (read_volatile(base.add(LSR)) & LSR_RX_READY) != 0 {
+            Some(read_volatile(base.add(RBR)))
+        } else {
+            None
+        }
     }
 }

@@ -35,7 +35,7 @@ pub fn write_mtimecmp(val: u64) {
 
 /// Enable machine timer interrupt (set MIE.MTIE)
 pub fn enable_timer_interrupt() {
-    const MIE_MTIE: u64 = 1 << 7;
+    const MIE_MTIE: u64 = 0b0000_0001 << 7;
     unsafe {
         asm!(
             "csrs mie, {}",
@@ -48,7 +48,7 @@ pub fn enable_timer_interrupt() {
 /// Disable machine timer interrupt (clear MIE.MTIE)
 #[allow(dead_code)]
 pub fn disable_timer_interrupt() {
-    const MIE_MTIE: u64 = 1 << 7;
+    const MIE_MTIE: u64 = 0b0000_0001 << 7;
     unsafe {
         asm!(
             "csrc mie, {}",
@@ -60,7 +60,7 @@ pub fn disable_timer_interrupt() {
 
 /// Enable global machine interrupts (set mstatus.MIE)
 pub fn enable_interrupts() {
-    const MSTATUS_MIE: u64 = 1 << 3;
+    const MSTATUS_MIE: u64 = 0b0000_0001 << 3;
     unsafe {
         asm!(
             "csrs mstatus, {}",
@@ -73,7 +73,7 @@ pub fn enable_interrupts() {
 /// Disable global machine interrupts (clear mstatus.MIE)
 #[allow(dead_code)]
 pub fn disable_interrupts() {
-    const MSTATUS_MIE: u64 = 1 << 3;
+    const MSTATUS_MIE: u64 = 0b0000_0001 << 3;
     unsafe {
         asm!(
             "csrc mstatus, {}",
