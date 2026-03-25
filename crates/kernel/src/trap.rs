@@ -5,6 +5,8 @@
 
 use core::arch::{asm, naked_asm};
 
+use crate::task::TaskContext;
+
 /// Trap frame saved on stack during trap handling.
 /// Must match the save/restore order in trap_vector.
 #[repr(C)]
@@ -243,19 +245,22 @@ extern "C" fn trap_handler(frame: &mut TrapFrame) {
 }
 
 /// Handle interrupts
-fn handle_interrupt(cause: u64, _frame: &mut TrapFrame) {
+fn handle_interrupt(cause: u64, frame: &mut TrapFrame) {
     match cause {
         7 => {
             // Machine timer interrupt
             crate::timer::increment_tick();
             let ticks = crate::timer::get_tick_count();
             // Print every 100 ticks (1 second at 10ms tick)
-            if ticks % 100 == 0 {
+            if ticks.is_multiple_of(100) {
                 crate::serial::puts("[timer] tick ");
                 crate::serial::put_dec(ticks);
                 crate::serial::puts("\n");
             }
             crate::timer::schedule_next_tick();
+            // Pass the mutable TrapFrame to the scheduler so it can switch tasks.
+            // SAFETY: frame is valid for the duration of the interrupt handler.
+            crate::scheduler::schedule(frame);
         }
         11 => {
             // Machine external interrupt
@@ -273,11 +278,45 @@ fn handle_interrupt(cause: u64, _frame: &mut TrapFrame) {
     }
 }
 
+/// Read mstatus CSR and extract MPP bits [12:11].
+/// Returns 0b00 for U-mode, 0b11 for M-mode.
+#[inline]
+fn read_mpp() -> u64 {
+    let mstatus: u64;
+    // SAFETY: CSR read is valid in M-mode; nostack ensures no stack frame.
+    unsafe {
+        asm!("csrr {}, mstatus", out(reg) mstatus, options(nostack));
+    }
+    (mstatus >> 11) & 0b11
+}
+
+/// Handle a memory access fault (causes 1, 5, 7).
+///
+/// Checks mstatus.MPP to determine fault origin. U-mode faults are handled
+/// gracefully (log + kill task). M-mode faults are fatal (panic).
+fn handle_access_fault(name: &str, mepc: u64, mtval: u64, frame: &mut TrapFrame) {
+    let mpp = read_mpp();
+    if mpp == 0b00 {
+        // U-mode access fault — log, kill the faulting task, schedule next.
+        crate::serial::puts("[trap] U-mode access fault: ");
+        crate::serial::puts(name);
+        crate::serial::puts(" at mepc=");
+        crate::serial::put_hex(mepc);
+        crate::serial::puts(" addr=");
+        crate::serial::put_hex(mtval);
+        crate::serial::puts("\n");
+        crate::scheduler::kill_current(frame);
+    } else {
+        // M-mode access fault — kernel bug, panic.
+        panic_exception(name, mepc, mtval);
+    }
+}
+
 /// Handle exceptions (synchronous traps)
-fn handle_exception(cause: u64, mepc: u64, mtval: u64, _frame: &mut TrapFrame) {
+fn handle_exception(cause: u64, mepc: u64, mtval: u64, frame: &mut TrapFrame) {
     match cause {
         0 => panic_exception("Instruction address misaligned", mepc, mtval),
-        1 => panic_exception("Instruction access fault", mepc, mtval),
+        1 => handle_access_fault("Instruction access fault", mepc, mtval, frame),
         2 => panic_exception("Illegal instruction", mepc, mtval),
         3 => {
             // Breakpoint - advance pc past ebreak and continue
@@ -287,13 +326,34 @@ fn handle_exception(cause: u64, mepc: u64, mtval: u64, _frame: &mut TrapFrame) {
             write_mepc(mepc + 4); // ebreak is 4 bytes (compressed = 2)
         }
         4 => panic_exception("Load address misaligned", mepc, mtval),
-        5 => panic_exception("Load access fault", mepc, mtval),
+        5 => handle_access_fault("Load access fault", mepc, mtval, frame),
         6 => panic_exception("Store address misaligned", mepc, mtval),
-        7 => panic_exception("Store access fault", mepc, mtval),
+        7 => handle_access_fault("Store access fault", mepc, mtval, frame),
         8 => {
             // Environment call from U-mode (syscall)
-            crate::serial::puts("[trap] Syscall from U-mode\n");
-            // TODO: Implement syscall handling
+            let syscall_num = frame.a7;
+            match syscall_num {
+                0 => {
+                    // SYS_GETC: non-blocking UART read. Returns 0xFF if no byte available.
+                    let byte = crate::serial::try_getc().unwrap_or(0xFF);
+                    frame.a0 = byte as u64;
+                }
+                1 => {
+                    // SYS_PUTC: write one byte to UART.
+                    let byte = frame.a0 as u8;
+                    crate::serial::putc(byte);
+                }
+                42 => {
+                    // Legacy POC syscall — kept for compatibility.
+                    crate::serial::puts("[trap] U-mode POC ecall (legacy)\n");
+                }
+                _ => {
+                    crate::serial::puts("[trap] Unknown syscall: ");
+                    crate::serial::put_dec(syscall_num);
+                    crate::serial::puts("\n");
+                }
+            }
+            // Advance mepc past the ecall instruction (4 bytes).
             write_mepc(mepc + 4);
         }
         9 => {
@@ -330,4 +390,124 @@ fn panic_exception(name: &str, mepc: u64, mtval: u64) -> ! {
     crate::serial::put_hex(mtval);
     crate::serial::puts("\n");
     panic!("{}", name);
+}
+
+/// Switch CPU context from `old` task to `new` task.
+///
+/// Saves the current mepc/mstatus CSRs into `old`, then delegates GPR
+/// save/restore and the final `mret` to the naked inner helper
+/// `do_context_switch_asm`.
+///
+/// The caller (scheduler) is responsible for installing the new task's PMP
+/// configuration via `pmp::load_task_config` **before** calling this function.
+///
+/// # Safety
+/// - `old` must be a valid, aligned pointer to a `TaskContext` for the current task.
+/// - `new` must be a valid, aligned pointer to a `TaskContext` for the next task.
+/// - Must be called with interrupts disabled (MIE=0); this is the caller's responsibility.
+/// - Must NOT be called from U-mode.
+#[allow(dead_code)]
+pub unsafe fn context_switch(old: *mut TaskContext, new: *const TaskContext) {
+    // Save mepc and mstatus CSRs into the old context before the GPR switch.
+    // SAFETY: CSR reads are valid in M-mode; `old` is a valid TaskContext pointer.
+    unsafe {
+        let mepc: u64;
+        let mstatus: u64;
+        asm!("csrr {}, mepc",    out(reg) mepc,    options(nostack));
+        asm!("csrr {}, mstatus", out(reg) mstatus, options(nostack));
+        (*old).mepc = mepc;
+        (*old).mstatus = mstatus;
+    }
+    // Perform the GPR save/restore and `mret` via the naked assembly helper.
+    // SAFETY: `old` and `new` are valid, aligned TaskContext pointers.
+    unsafe { do_context_switch_asm(old, new) }
+}
+
+/// Naked inner helper that saves/restores all 31 GPRs and executes `mret`.
+///
+/// On entry (C-ABI): a0 = old (*mut TaskContext), a1 = new (*const TaskContext).
+///
+/// Saves all 31 GPRs to `*old`, writes new task's mepc/mstatus to CSRs,
+/// loads all 31 GPRs from `*new` (a1 loaded last to exhaust the base pointer),
+/// then executes `mret` to transfer control to the new task.
+///
+/// # Safety
+/// Must only be called from `context_switch`. Both pointers must be valid.
+#[unsafe(naked)]
+unsafe extern "C" fn do_context_switch_asm(_old: *mut TaskContext, _new: *const TaskContext) {
+    naked_asm!(
+        // --- Save all 31 GPRs to old (a0) ---
+        "sd ra,    0(a0)",
+        "sd t0,    8(a0)",
+        "sd t1,   16(a0)",
+        "sd t2,   24(a0)",
+        "sd t3,   32(a0)",
+        "sd t4,   40(a0)",
+        "sd t5,   48(a0)",
+        "sd t6,   56(a0)",
+        // a0 holds the `old` pointer; saving it as-is is intentional —
+        // the real task a0 was captured in the TrapFrame by trap_vector.
+        "sd a0,   64(a0)",
+        "sd a1,   72(a0)",
+        "sd a2,   80(a0)",
+        "sd a3,   88(a0)",
+        "sd a4,   96(a0)",
+        "sd a5,  104(a0)",
+        "sd a6,  112(a0)",
+        "sd a7,  120(a0)",
+        "sd s0,  128(a0)",
+        "sd s1,  136(a0)",
+        "sd s2,  144(a0)",
+        "sd s3,  152(a0)",
+        "sd s4,  160(a0)",
+        "sd s5,  168(a0)",
+        "sd s6,  176(a0)",
+        "sd s7,  184(a0)",
+        "sd s8,  192(a0)",
+        "sd s9,  200(a0)",
+        "sd s10, 208(a0)",
+        "sd s11, 216(a0)",
+        "sd gp,  224(a0)",
+        "sd tp,  232(a0)",
+        "sd sp,  240(a0)",
+        // --- Load new task's CSRs from new (a1), using t0 as scratch ---
+        "ld t0,  248(a1)",
+        "csrw mepc, t0",
+        "ld t0,  256(a1)",
+        "csrw mstatus, t0",
+        // --- Load all 31 GPRs from new (a1); a1 loaded last ---
+        "ld ra,    0(a1)",
+        "ld t0,    8(a1)",
+        "ld t1,   16(a1)",
+        "ld t2,   24(a1)",
+        "ld t3,   32(a1)",
+        "ld t4,   40(a1)",
+        "ld t5,   48(a1)",
+        "ld t6,   56(a1)",
+        "ld a0,   64(a1)",
+        // a1 is still the base pointer; loaded last below
+        "ld a2,   80(a1)",
+        "ld a3,   88(a1)",
+        "ld a4,   96(a1)",
+        "ld a5,  104(a1)",
+        "ld a6,  112(a1)",
+        "ld a7,  120(a1)",
+        "ld s0,  128(a1)",
+        "ld s1,  136(a1)",
+        "ld s2,  144(a1)",
+        "ld s3,  152(a1)",
+        "ld s4,  160(a1)",
+        "ld s5,  168(a1)",
+        "ld s6,  176(a1)",
+        "ld s7,  184(a1)",
+        "ld s8,  192(a1)",
+        "ld s9,  200(a1)",
+        "ld s10, 208(a1)",
+        "ld s11, 216(a1)",
+        "ld gp,  224(a1)",
+        "ld tp,  232(a1)",
+        "ld sp,  240(a1)",
+        "ld a1,   72(a1)", // a1 is the base pointer; must be loaded last
+        "mret",
+    )
 }

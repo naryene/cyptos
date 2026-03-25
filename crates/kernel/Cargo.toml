@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+test = false
+bench = false
+
 [dependencies]
 
 [features]
