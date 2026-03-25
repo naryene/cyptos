@@ -27,6 +27,15 @@ SECTIONS
         _etext = .;
     } > RAM
 
+    /* User-mode task code — placed separately to support future permission control */
+    .user_text : ALIGN(4K)
+    {
+        _user_text_start = .;
+        *(.user_text .user_text.*)
+        . = ALIGN(4K);
+        _user_text_end = .;
+    } > RAM
+
     /* Read-only data */
     .rodata : ALIGN(4K)
     {
