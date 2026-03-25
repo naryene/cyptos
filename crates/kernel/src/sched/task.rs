@@ -3,10 +3,9 @@
 //! Defines the task lifecycle types used by the scheduler and context switch.
 //! Reference: RISC-V Privileged Specification v1.12, Section 3.1.6 (mstatus layout)
 
-use crate::pmp::{PMP_COUNT, PmpRegion};
-
-/// Maximum number of concurrent user tasks.
-pub const MAX_TASKS: usize = 4;
+pub use crate::config::MAX_TASKS;
+use crate::config::PMP_COUNT;
+use crate::pmp::PmpRegion;
 
 /// Saved CPU context for a task.
 ///
@@ -147,6 +146,73 @@ impl PmpConfig {
         Self {
             regions: [PmpRegion::new(0, 0, 0); PMP_COUNT],
         }
+    }
+
+    /// Create a builder for ergonomic PMP region setup.
+    ///
+    /// User-task entries start at index 4; entries 0-3 are reserved for the
+    /// locked kernel regions installed by `pmp::init()`.
+    pub fn builder() -> PmpConfigBuilder {
+        PmpConfigBuilder {
+            regions: [PmpRegion::new(0, 0, 0); PMP_COUNT],
+            next_idx: 4,
+        }
+    }
+}
+
+/// Builder for [`PmpConfig`].
+///
+/// Entries 0-3 are reserved for locked kernel PMP regions and must not be
+/// written here. The builder starts at index 4 and advances on each call.
+pub struct PmpConfigBuilder {
+    regions: [PmpRegion; PMP_COUNT],
+    next_idx: usize,
+}
+
+impl PmpConfigBuilder {
+    /// Add a code region (Read + Execute).
+    pub fn code_region(mut self, base: u64, size: u64) -> Self {
+        assert!(self.next_idx < PMP_COUNT, "PMP region table full");
+        assert!(size.is_power_of_two(), "PMP region size must be power of 2");
+        assert!(base & (size - 1) == 0, "PMP region base must be aligned to size");
+        self.regions[self.next_idx] = PmpRegion::new(base, size, crate::pmp::flags::RX);
+        self.next_idx += 1;
+        self
+    }
+
+    /// Add a stack region (Read + Write).
+    pub fn stack_region(mut self, base: u64, size: u64) -> Self {
+        assert!(self.next_idx < PMP_COUNT, "PMP region table full");
+        assert!(size.is_power_of_two(), "PMP region size must be power of 2");
+        assert!(base & (size - 1) == 0, "PMP region base must be aligned to size");
+        self.regions[self.next_idx] = PmpRegion::new(base, size, crate::pmp::flags::RW);
+        self.next_idx += 1;
+        self
+    }
+
+    /// Add an MMIO region (Read + Write).
+    pub fn mmio_region(mut self, base: u64, size: u64) -> Self {
+        assert!(self.next_idx < PMP_COUNT, "PMP region table full");
+        assert!(size.is_power_of_two(), "PMP region size must be power of 2");
+        assert!(base & (size - 1) == 0, "PMP region base must be aligned to size");
+        self.regions[self.next_idx] = PmpRegion::new(base, size, crate::pmp::flags::RW);
+        self.next_idx += 1;
+        self
+    }
+
+    /// Add a region with custom flags.
+    pub fn region(mut self, base: u64, size: u64, flags: u8) -> Self {
+        assert!(self.next_idx < PMP_COUNT, "PMP region table full");
+        assert!(size.is_power_of_two(), "PMP region size must be power of 2");
+        assert!(base & (size - 1) == 0, "PMP region base must be aligned to size");
+        self.regions[self.next_idx] = PmpRegion::new(base, size, flags);
+        self.next_idx += 1;
+        self
+    }
+
+    /// Finalize the PMP configuration.
+    pub fn build(self) -> PmpConfig {
+        PmpConfig { regions: self.regions }
     }
 }
 

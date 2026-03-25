@@ -5,7 +5,7 @@
 
 use core::arch::{asm, naked_asm};
 
-use crate::task::TaskContext;
+use crate::sched::TaskContext;
 
 /// Trap frame saved on stack during trap handling.
 /// Must match the save/restore order in trap_vector.
@@ -44,6 +44,8 @@ pub struct TrapFrame {
     pub sp: u64, // Original sp before trap
 }
 
+const _: () = assert!(core::mem::size_of::<TrapFrame>() == 248);
+
 /// RISC-V exception causes (mcause values when interrupt bit = 0)
 #[derive(Debug, Clone, Copy)]
 #[repr(u64)]
@@ -81,54 +83,33 @@ pub enum Interrupt {
 /// Initialize trap handling by setting mtvec to our trap vector.
 /// Uses direct mode (all traps go to the same handler).
 pub fn init() {
-    unsafe {
-        let trap_addr = trap_vector;
-        // Mode 0 = Direct: all traps set pc to BASE
-        asm!(
-            "csrw mtvec, {addr}",
-            addr = in(reg) trap_addr,
-            options(nostack)
-        );
-    }
+    let trap_addr = trap_vector as *const () as u64;
+    crate::arch::csr::mtvec::write(trap_addr);
     crate::serial::puts("[trap] mtvec initialized\n");
 }
 
 /// Read mcause CSR
 #[inline]
 pub fn read_mcause() -> u64 {
-    let val: u64;
-    unsafe {
-        asm!("csrr {}, mcause", out(reg) val, options(nostack));
-    }
-    val
+    crate::arch::csr::mcause::read()
 }
 
 /// Read mepc CSR (exception program counter)
 #[inline]
 pub fn read_mepc() -> u64 {
-    let val: u64;
-    unsafe {
-        asm!("csrr {}, mepc", out(reg) val, options(nostack));
-    }
-    val
+    crate::arch::csr::mepc::read()
 }
 
 /// Write mepc CSR
 #[inline]
 pub fn write_mepc(val: u64) {
-    unsafe {
-        asm!("csrw mepc, {}", in(reg) val, options(nostack));
-    }
+    crate::arch::csr::mepc::write(val)
 }
 
 /// Read mtval CSR (trap value - faulting address or instruction)
 #[inline]
 pub fn read_mtval() -> u64 {
-    let val: u64;
-    unsafe {
-        asm!("csrr {}, mtval", out(reg) val, options(nostack));
-    }
-    val
+    crate::arch::csr::mtval::read()
 }
 
 /// Naked trap vector entry point.
@@ -260,7 +241,7 @@ fn handle_interrupt(cause: u64, frame: &mut TrapFrame) {
             crate::timer::schedule_next_tick();
             // Pass the mutable TrapFrame to the scheduler so it can switch tasks.
             // SAFETY: frame is valid for the duration of the interrupt handler.
-            crate::scheduler::schedule(frame);
+            crate::sched::schedule(frame);
         }
         11 => {
             // Machine external interrupt
@@ -282,12 +263,7 @@ fn handle_interrupt(cause: u64, frame: &mut TrapFrame) {
 /// Returns 0b00 for U-mode, 0b11 for M-mode.
 #[inline]
 fn read_mpp() -> u64 {
-    let mstatus: u64;
-    // SAFETY: CSR read is valid in M-mode; nostack ensures no stack frame.
-    unsafe {
-        asm!("csrr {}, mstatus", out(reg) mstatus, options(nostack));
-    }
-    (mstatus >> 11) & 0b11
+    crate::arch::csr::mstatus::read_mpp()
 }
 
 /// Handle a memory access fault (causes 1, 5, 7).
@@ -305,10 +281,34 @@ fn handle_access_fault(name: &str, mepc: u64, mtval: u64, frame: &mut TrapFrame)
         crate::serial::puts(" addr=");
         crate::serial::put_hex(mtval);
         crate::serial::puts("\n");
-        crate::scheduler::kill_current(frame);
+        crate::sched::kill_current(frame);
     } else {
         // M-mode access fault — kernel bug, panic.
         panic_exception(name, mepc, mtval);
+    }
+}
+
+/// Handle a U-mode syscall (ecall from U-mode).
+/// Dispatches based on syscall number in a7.
+fn handle_syscall(frame: &mut TrapFrame) {
+    match frame.a7 {
+        crate::config::SYS_GETC => {
+            // SYS_GETC: non-blocking UART read. Returns 0xFF if no byte available.
+            frame.a0 = crate::serial::try_getc().unwrap_or(0xFF) as u64;
+        }
+        crate::config::SYS_PUTC => {
+            // SYS_PUTC: write one byte to UART.
+            crate::serial::putc(frame.a0 as u8);
+        }
+        crate::config::SYS_LEGACY_POC => {
+            // Legacy POC syscall — kept for compatibility.
+            crate::serial::puts("[trap] U-mode POC ecall (legacy)\n");
+        }
+        _ => {
+            crate::serial::puts("[syscall] unknown: ");
+            crate::serial::put_dec(frame.a7);
+            crate::serial::puts("\n");
+        }
     }
 }
 
@@ -330,30 +330,7 @@ fn handle_exception(cause: u64, mepc: u64, mtval: u64, frame: &mut TrapFrame) {
         6 => panic_exception("Store address misaligned", mepc, mtval),
         7 => handle_access_fault("Store access fault", mepc, mtval, frame),
         8 => {
-            // Environment call from U-mode (syscall)
-            let syscall_num = frame.a7;
-            match syscall_num {
-                0 => {
-                    // SYS_GETC: non-blocking UART read. Returns 0xFF if no byte available.
-                    let byte = crate::serial::try_getc().unwrap_or(0xFF);
-                    frame.a0 = byte as u64;
-                }
-                1 => {
-                    // SYS_PUTC: write one byte to UART.
-                    let byte = frame.a0 as u8;
-                    crate::serial::putc(byte);
-                }
-                42 => {
-                    // Legacy POC syscall — kept for compatibility.
-                    crate::serial::puts("[trap] U-mode POC ecall (legacy)\n");
-                }
-                _ => {
-                    crate::serial::puts("[trap] Unknown syscall: ");
-                    crate::serial::put_dec(syscall_num);
-                    crate::serial::puts("\n");
-                }
-            }
-            // Advance mepc past the ecall instruction (4 bytes).
+            handle_syscall(frame);
             write_mepc(mepc + 4);
         }
         9 => {

@@ -64,17 +64,21 @@ _start (naked, .text.entry)
     ├─► Call clear_bss()
     └─► Call kmain()
             │
-            ├─► serial::init()    - Initialize serial backend for debug output
-            ├─► trap::init()      - Set mtvec to trap_vector
-            ├─► pmp::init()       - Configure memory protection
-            ├─► timer::init()     - Setup CLINT timer
-            ├─► timer::enable_interrupts() - Enable global interrupts
-            └─► loop { wfi }      - Idle loop (wait for interrupt)
+            ├─► serial::init()                         - Initialize serial backend for debug output
+            ├─► ALLOCATOR.init(heap_start, heap_end)   - Initialize bump heap allocator
+            ├─► trap::init()                           - Set mtvec to trap_vector
+            ├─► pmp::init()                            - Configure memory protection
+            ├─► timer::init()                          - Setup CLINT timer
+            ├─► scheduler::create_task(user_echo_task, ...)      [PMP: code RX + stack RW + UART RW]
+            ├─► scheduler::create_task(user_violation_task, ...) [PMP: code RX + stack RW, no UART]
+            ├─► scheduler::init()                      - Transition Created tasks to Ready
+            ├─► timer::enable_interrupts()             - Enable global interrupts
+            └─► loop { wfi }      - Idle loop (scheduler runs from timer ISR)
 ```
 
 ## Module Reference
 
-### serial/uart16550.rs - Serial Console
+### serial.rs / serial/uart16550.rs - Serial Console
 
 NS16550A UART driver for QEMU virt machine.
 
@@ -157,9 +161,10 @@ trap_handler
 
 | Code | Name | Action |
 |------|------|--------|
-| 0-2, 4-7, 12-15 | Faults | Panic with diagnostic |
+| 0-2, 12-15 | Faults | Panic with diagnostic |
+| 1, 5, 7 | Access Faults | Check MPP: U-mode faults kill task + reschedule; M-mode faults panic |
 | 3 | Breakpoint | Log, advance mepc by 4 |
-| 8 | Ecall from U-mode | Log (syscall placeholder), advance mepc |
+| 8 | Ecall from U-mode | Dispatch syscall by a7: SYS_GETC (0) non-blocking UART read → a0; SYS_PUTC (1) write a0 to UART; syscall 42 legacy POC (kept for compat); advance mepc |
 | 9 | Ecall from S-mode | Log, advance mepc |
 | 11 | Ecall from M-mode | Log, advance mepc |
 
@@ -168,7 +173,7 @@ trap_handler
 | Code | Name | Action |
 |------|------|--------|
 | 3 | Machine Software | Log |
-| 7 | Machine Timer | Increment tick, schedule next, log every 100 ticks |
+| 7 | Machine Timer | Increment tick, schedule next tick, call scheduler::schedule(frame) for preemptive context switch, log every 100 ticks |
 | 11 | Machine External | Log |
 
 ### pmp.rs - Physical Memory Protection
@@ -250,8 +255,8 @@ Manages machine timer for preemption.
 | `set_timer_us(u64)` | Schedule interrupt at now + microseconds |
 | `clear_timer()` | Set mtimecmp to MAX (disable) |
 | `schedule_next_tick()` | Schedule next 10ms tick |
-| `get_tick_count() -> u64` | Get total ticks since boot |
-| `increment_tick()` | Increment tick counter (called from ISR) |
+| `get_tick_count() -> u64` | Get total ticks since boot (reads `AtomicCounter`) |
+| `increment_tick()` | Increment `AtomicCounter` tick counter (called from ISR) |
 
 **Timer Interrupt Flow:**
 
@@ -266,6 +271,107 @@ trap_vector → trap_handler → handle_interrupt(7)
     ├─► schedule_next_tick() → set_timer_us(10000)
     └─► Return from interrupt
 ```
+
+### allocator.rs - Bump Heap Allocator
+
+Provides a simple bump allocator registered as the global Rust allocator.
+
+| Item | Description |
+|------|-------------|
+| `BumpAllocator` | Struct implementing `GlobalAlloc` |
+| `new()` | Const constructor, uninitialized state |
+| `init(heap_start, heap_end)` | Initialize from linker symbols; sets base and end pointers |
+| `alloc()` | Bump pointer forward with alignment, returns null on OOM |
+| `dealloc()` | No-op (non-freeing allocator) |
+
+**Notes:** Uses `AtomicUsize` for the bump pointer. Single-hart only; no concurrent alloc support.
+
+---
+
+### sched/task.rs - Task Metadata
+
+Defines task structures and state machine used by the scheduler.
+
+| Item | Description |
+|------|-------------|
+| `MAX_TASKS` | `4` - maximum simultaneous tasks |
+| `TaskContext` | 31 GPRs + mepc + mstatus (264 bytes, `repr(C)`) |
+| `TaskContext::new_umode(entry, stack_top)` | Initialize context for U-mode: MPP=00, MPIE=1 |
+| `TaskState` | Enum: `Created`, `Ready`, `Running`, `Dead` |
+| `TaskId(u8)` | Newtype wrapper for task index |
+| `PmpConfig` | 16 `PmpRegion` entries per task |
+| `Task` | `id`, `state`, `context`, `pmp_config`, `stack_bottom`, `stack_top`, `entry_point` |
+
+---
+
+### sched/scheduler.rs - Round-Robin Scheduler
+
+Manages task lifecycle and performs preemptive context switches.
+
+| Item | Description |
+|------|-------------|
+| `SCHEDULER` | `IrqCell<SchedulerState>` — interrupt-disable protected state |
+| `SchedulerState.current` | `usize`; `usize::MAX` means idle |
+| `SchedulerState.tasks` | `[Option<Task>; MAX_TASKS]` task table |
+| `init()` | Transition all `Created` tasks to `Ready` |
+| `schedule(&mut TrapFrame)` | Save current context, round-robin pick next `Ready` task, swap PMP, restore context + CSRs |
+| `create_task(entry, stack_top, &[PmpRegion])` | Allocate task slot, return `TaskId` |
+| `kill_current(&mut TrapFrame)` | Mark current task `Dead`, call `schedule()` |
+
+**Context Switch Flow:**
+
+```
+Timer ISR fires
+    │
+    ▼
+schedule(&mut TrapFrame)
+    ├─► Save GPRs + mepc + mstatus from TrapFrame into current TaskContext
+    ├─► Find next Ready task (round-robin)
+    ├─► clear_all() + configure PMP regions for next task
+    ├─► Restore next task's GPRs + mepc + mstatus into TrapFrame
+    └─► mret → next task resumes
+```
+
+---
+
+### user_task.rs - U-mode Tasks
+
+User-space task code running in U-mode (MPP=00), placed in `.user_text` section.
+
+| Item | Description |
+|------|-------------|
+| `SYS_GETC` | Syscall number `0` - non-blocking UART read |
+| `SYS_PUTC` | Syscall number `1` - write byte to UART |
+| `user_echo_task()` | Polls `SYS_GETC`, echoes received bytes via `SYS_PUTC`; maps `\r` → `\n` |
+| `user_violation_task()` | Reads address `0x8000_0000` to trigger Load Access Fault (intentional isolation demo) |
+
+**Notes:** Both tasks run in U-mode with per-task PMP configurations. A fault in `user_violation_task` is caught by the trap handler, the task is killed, and the scheduler reschedules.
+
+---
+
+## Synchronization Model
+
+CyptOS is currently single-hart, so synchronization needs are modest.
+
+| Primitive | Type | Usage |
+|-----------|------|-------|
+| `IrqCell<T>` | Interrupt-disable wrapper | Protects shared kernel state (scheduler task table, current task index) |
+| `AtomicCounter` | Lock-free atomic `u64` | Tick counter incremented from the timer ISR |
+
+`IrqCell<T>` disables machine interrupts (`mstatus.MIE`) for the duration of a critical section, matching the Linux pattern for single-CPU interrupt-disable locks. `AtomicCounter` uses `core::sync::atomic::AtomicU64` and requires no interrupt masking.
+
+When multi-hart support is added, `IrqCell` will be replaced or supplemented with spinlocks (ticket or MCS) and per-hart state will be introduced.
+
+## CSR Access Layer
+
+All CSR reads and writes outside naked assembly functions go through `arch::csr`. The module provides:
+
+- Macro-based `csr_read!` / `csr_write!` primitives wrapping inline asm
+- Typed wrappers for `mstatus`, `mcause`, `mepc`, `mtval`, `mtvec`, and `mie`
+
+This keeps raw CSR names out of the trap, timer, and scheduler modules and makes the access points easy to audit.
+
+---
 
 ## Security Model (Planned)
 
@@ -294,26 +400,47 @@ Access rights defined at build time per task:
 
 ```
 cyptos/
-├── Cargo.toml              # Workspace config
+├── Cargo.toml
+├── Makefile
 ├── .cargo/
-│   └── config.toml         # Target: riscv64gc-unknown-none-elf
+│   └── config.toml
 ├── board/
 │   └── qemu-virt/
-│       └── linker.ld       # Memory layout for QEMU virt
+│       └── linker.ld
 ├── crates/
 │   └── kernel/
 │       ├── Cargo.toml
 │       └── src/
-│           ├── main.rs     # Entry point, kmain, panic handler
-│           ├── serial/     # Serial backends (feature-selected)
-│           │   ├── mod.rs
-│           │   ├── uart16550.rs
-│           │   └── usart_stm32.rs (stub)
-│           ├── trap.rs     # Trap vector and handlers
-│           ├── pmp.rs      # PMP configuration
-│           └── timer.rs    # CLINT timer driver
-└── docs/
-    └── architecture.md     # This document
+│           ├── main.rs          # Entry point, kmain, panic handler
+│           ├── config.rs        # Centralized constants (MMIO, syscalls, limits)
+│           ├── arch.rs          # RISC-V architecture abstractions
+│           ├── arch/
+│           │   ├── csr.rs       # CSR read/write macros + typed wrappers
+│           │   └── register.rs  # GPR copy macro
+│           ├── sync.rs          # Synchronization primitives
+│           ├── sync/
+│           │   ├── irq_cell.rs  # Interrupt-disable critical section
+│           │   └── atomic_counter.rs
+│           ├── sched.rs         # Scheduling subsystem
+│           ├── sched/
+│           │   ├── task.rs      # Task types, PmpConfig builder
+│           │   └── scheduler.rs # Round-robin scheduler
+│           ├── trap.rs          # Trap vector and handlers
+│           ├── pmp.rs           # PMP configuration
+│           ├── timer.rs         # CLINT timer driver
+│           ├── allocator.rs     # Bump heap allocator
+│           ├── serial.rs        # Serial backend selection
+│           ├── serial/
+│           │   ├── uart16550.rs # NS16550A UART driver
+│           │   └── usart_stm32.rs # STM32 stub
+│           └── user_task.rs     # U-mode task code
+├── crates/
+│   ├── cyptos-test/
+│   └── cyptos-test-macros/
+├── docs/
+│   ├── architecture.md
+│   └── testing.md
+└── tools/docker/Dockerfile
 ```
 
 ## Build & Run
@@ -353,22 +480,28 @@ qemu-system-riscv64 \
 - [x] PMP driver
 - [x] CLINT timer
 
-### Phase 2 - Task Model (Next)
-- [ ] Task metadata struct
-- [ ] Build-time task table
-- [ ] Task state machine
-- [ ] Context switch
+### Phase 2 - Task Model ✓
+- [x] Task metadata struct
+- [x] Static task table
+- [x] Task state machine
+- [x] Context switch
+
+### Phase 2.5 - Heap & User Tasks ✓
+- [x] Bump heap allocator
+- [x] U-mode task execution
+- [x] Syscall interface (SYS_GETC, SYS_PUTC)
+- [x] Graceful fault handling (kill + reschedule)
 
 ### Phase 3 - Capability System
 - [ ] Capability types
 - [ ] Per-task capability bitfield
 - [ ] Syscall capability checks
 
-### Phase 4 - Scheduler
-- [ ] Round-robin scheduler
+### Phase 4 - Scheduler (Partial) ✓
+- [x] Round-robin scheduler
 - [ ] Priority queues
 - [ ] Idle task
-- [ ] PMP swap on context switch
+- [x] PMP swap on context switch
 
 ### Phase 5 - Syscalls & IPC
 - [ ] Syscall dispatch

@@ -6,9 +6,11 @@
 use core::arch::asm;
 
 /// SYS_GETC: non-blocking read of one byte from UART. Returns 0xFF if no byte available.
+/// Must match `crate::config::SYS_GETC`. Cannot use Rust constants in inline asm string literals.
 #[allow(dead_code)]
 const SYS_GETC: u64 = 0;
 /// SYS_PUTC: write one byte to UART. a0 = byte value.
+/// Must match `crate::config::SYS_PUTC`. Cannot use Rust constants in inline asm string literals.
 #[allow(dead_code)]
 const SYS_PUTC: u64 = 1;
 

@@ -1,105 +1,128 @@
 # CyptOS
 
-A capability-based microkernel for RISC-V 64-bit, focused on security and cryptography.
-
-## Overview
-
-CyptOS is a bare-metal microkernel targeting RV64GC, written entirely in Rust with no C code. It runs in M-mode without SBI/OpenSBI, using PMP (Physical Memory Protection) for hardware-enforced memory isolation. The security model is inspired by [Sentry OS](https://github.com/outpost-os/sentry-kernel), with build-time task metadata and capability-based access control. Targets the RISC-V Privileged Specification v1.12.
-
-Currently in early development.
+A security-focused RISC-V 64-bit microkernel written in Rust.
 
 ## Features
 
-- Bare-metal M-mode execution (no SBI/OpenSBI dependency)
-- SMP-aware boot (hart 0 boots, others park via WFI)
-- NS16550A UART driver with build-time serial backend selection (UART/USART)
-- Full trap handling (exceptions + interrupts) with 31-register TrapFrame save/restore
-- PMP driver with NAPOT encoding (16 entries)
-- CLINT timer with 10ms periodic tick
-- Custom test framework (`#[cyptos_test]`) working on both host and bare-metal
+- Bare-metal boot on RISC-V 64-bit (hart 0; secondary harts parked via WFI)
+- NS16550A UART serial driver with build-time backend selection
+- M-mode trap handling via `mtvec` direct mode (exceptions and interrupts)
+- Physical Memory Protection (PMP) with NAPOT encoding and per-task regions
+- CLINT timer driver with 10ms preemption tick
+- Bump heap allocator bounded by linker symbols
+- Round-robin preemptive scheduler with full CPU context save/restore (31 GPRs + mepc + mstatus)
+- U-mode task execution with PMP isolation
+- Syscall interface: `SYS_GETC` (0), `SYS_PUTC` (1)
+- Graceful U-mode fault handling: kill faulting task and reschedule
+- Custom test framework (`cyptos-test`) supporting both host and bare-metal targets
 
 ## Prerequisites
 
 Docker. Everything else (Rust nightly, QEMU, binutils) lives inside the container.
 
-```bash
-# Build the development container (first time only)
+```sh
 make docker-build
 ```
 
 ## Quick Start
 
-```bash
-# Build and run in QEMU
+Build the Docker development image (first time only), then run the kernel in QEMU:
+
+```sh
+make docker-build
 make run
-
-# Build only (debug)
-make build
-
-# Build only (release)
-make release
 ```
 
-## Make Targets
+For a debug session with GDB attached on port 1234:
 
-| Target | Description |
-|--------|-------------|
-| `make run` | Build release and run in QEMU |
-| `make build` | Debug build |
-| `make release` | Release build + objcopy to raw binary |
-| `make test` | Run host tests (`x86_64`) |
-| `make debug` | Run with GDB server on port 1234 |
-| `make check` | Type-check without building |
-| `make fmt` | Format code |
-| `make clippy` | Lint |
-| `make objdump` | Disassemble kernel ELF |
-| `make size` | Show kernel binary size |
-| `make docker-shell` | Open shell in the build container |
-| `make clean` | Remove build artifacts |
+```sh
+make debug
+# In a second terminal:
+gdb-multiarch -ex 'target remote :1234' target/riscv64gc-unknown-none-elf/release/kernel
+```
+
+## Build Commands
+
+| Command             | Description                                       |
+|---------------------|---------------------------------------------------|
+| `make build`        | Debug build                                       |
+| `make release`      | Release build + strip to flat binary              |
+| `make run`          | Build (release) and run in QEMU                   |
+| `make debug`        | Run in QEMU with GDB server on port 1234          |
+| `make test`         | Run host unit tests (`cyptos-test` crate)         |
+| `make check`        | Type-check without building                       |
+| `make fmt`          | Format all crates                                 |
+| `make clippy`       | Lint all targets                                  |
+| `make doc`          | Generate rustdoc                                  |
+| `make audit`        | Audit unsafe blocks via clippy lints              |
+| `make objdump`      | Disassemble kernel ELF                            |
+| `make size`         | Show kernel binary size                           |
+| `make clean`        | Remove build artifacts                            |
+| `make docker-build` | Build the Docker development image                |
+| `make docker-shell` | Open an interactive shell in the container        |
+
+All build commands run inside Docker. Do not invoke `cargo` directly.
 
 ## Project Structure
 
 ```
 cyptos/
-├── board/
-│   └── qemu-virt/
-│       └── linker.ld              # Memory layout
+├── Cargo.toml                  # Workspace (edition 2024, no_std)
+├── Makefile                    # Docker-based build system
+├── .cargo/config.toml          # riscv64gc-unknown-none-elf target
+├── board/qemu-virt/linker.ld   # Linker script for QEMU virt machine
 ├── crates/
-│   ├── kernel/                    # The microkernel
-│   │   └── src/
-│   │       ├── main.rs            # Entry point, boot, panic handler
-│   │       ├── trap.rs            # Exception/interrupt handling
-│   │       ├── pmp.rs             # Physical Memory Protection
-│   │       ├── timer.rs           # CLINT timer driver
-│   │       └── serial/            # Serial backends (feature-gated)
-│   ├── cyptos-test/               # Test runtime (host + bare-metal)
-│   └── cyptos-test-macros/        # #[cyptos_test] proc macro
+│   ├── kernel/src/
+│   │   ├── main.rs             # Entry point, kmain, panic handler
+│   │   ├── config.rs           # Centralized constants
+│   │   ├── arch/               # CSR access, register macros
+│   │   ├── sync/               # IrqCell, AtomicCounter
+│   │   ├── sched/              # Task types, round-robin scheduler
+│   │   ├── trap.rs             # Trap vector and handlers
+│   │   ├── pmp.rs              # PMP configuration
+│   │   ├── timer.rs            # CLINT timer driver
+│   │   ├── allocator.rs        # Bump heap allocator
+│   │   ├── serial/             # UART backends (NS16550A, STM32 stub)
+│   │   └── user_task.rs        # U-mode task implementations
+│   ├── cyptos-test/            # Test runtime (host + bare-metal)
+│   └── cyptos-test-macros/     # #[cyptos_test] procedural macro
 ├── docs/
-│   ├── architecture.md            # Kernel architecture reference
-│   └── testing.md                 # Test framework usage
-├── tools/
-│   └── docker/
-│       └── Dockerfile             # Development environment
-├── Cargo.toml                     # Workspace config
-├── Makefile                       # Build system
-└── rust-toolchain.toml            # Pinned to nightly-2026-02-14
+│   ├── architecture.md
+│   └── testing.md
+└── tools/docker/Dockerfile
 ```
 
-## Documentation
+## Architecture
 
-- [Kernel Architecture](docs/architecture.md) — memory layout, boot sequence, module reference, security model
-- [Testing](docs/testing.md) — how to use `#[cyptos_test]` on host and bare-metal
+CyptOS runs entirely in M-mode with user tasks demoted to U-mode. Memory isolation is enforced through PMP regions configured per task before each context switch. The scheduler is interrupt-driven: the CLINT timer fires every 10ms, triggers an M-mode trap, and the trap handler invokes the scheduler to select the next runnable task. Kernel shared state is protected by interrupt-disable critical sections (IrqCell), and all CSR access is routed through typed wrappers in the arch module.
+
+See [docs/architecture.md](docs/architecture.md) for a detailed breakdown.
+
+## QEMU Configuration
+
+| Parameter | Value                      |
+|-----------|----------------------------|
+| Machine   | `virt`                     |
+| SMP       | 4 cores                    |
+| RAM       | 128 MB                     |
+| BIOS      | none (bare-metal)          |
+| UART      | NS16550A at `0x1000_0000`  |
+| Timer     | CLINT at 10 MHz, 10ms tick |
 
 ## Roadmap
 
-- ✅ Phase 0: Bootstrap (entry point, BSS init, UART, panic handler)
-- ✅ Phase 1: Memory & Traps (trap vector, PMP driver, CLINT timer)
-- 🔲 Phase 2: Task Model (metadata struct, task table, state machine, context switch)
-- 🔲 Phase 3: Capability System (types, per-task bitfield, syscall checks)
-- 🔲 Phase 4: Scheduler (round-robin, priority queues, PMP swap on context switch)
-- 🔲 Phase 5: Syscalls & IPC
-- 🔲 Phase 6: Drivers & Hardening
+- [x] Bare-metal boot and UART output
+- [x] M-mode trap handling
+- [x] PMP-based U-mode isolation
+- [x] Preemptive round-robin scheduler
+- [x] Syscall interface
+- [x] U-mode fault recovery
+- [ ] Virtual memory (Sv39 page tables)
+- [ ] Inter-process communication
+- [ ] Capability-based access control
+- [ ] Persistent storage driver
+- [ ] Real hardware target (SiFive HiFive)
 
 ## License
 
-MIT OR Apache-2.0
+Licensed under either of [MIT](LICENSE-MIT)

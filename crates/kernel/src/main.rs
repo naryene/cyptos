@@ -1,13 +1,22 @@
+//! CyptOS kernel entry point and boot sequence.
+//!
+//! `_start` (naked) runs on hart 0: sets the stack pointer, zeroes `.bss`, and
+//! calls `kmain`. Secondary harts park in a `wfi` loop. `kmain` initializes the
+//! heap, trap vector, PMP, timer, creates user-mode tasks with per-task PMP
+//! regions, starts the scheduler, and enters the idle loop. All subsequent
+//! scheduling is driven by the timer ISR in `trap.rs`.
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
 mod allocator;
+mod arch;
+mod config;
 mod pmp;
-mod scheduler;
+mod sched;
 mod serial;
-mod task;
+mod sync;
 mod timer;
 mod trap;
 mod user_task;
@@ -84,9 +93,9 @@ extern "C" fn kmain() -> ! {
         serial::puts("\n");
     }
 
-    trap::init();
-    pmp::init();
-    timer::init();
+    trap::init();  // install mtvec handler
+    pmp::init();   // lock kernel memory regions
+    timer::init(); // arm CLINT and enable timer interrupt
 
     // Declare linker symbols for user text section bounds.
     unsafe extern "C" {
@@ -94,29 +103,32 @@ extern "C" fn kmain() -> ! {
     }
 
     // SAFETY: Layout is valid (8 KB size, 8 KB alignment ensures NAPOT-aligned stack).
-    let stack_layout = unsafe { alloc::alloc::Layout::from_size_align_unchecked(8192, 8192) };
+    let stack_layout = unsafe {
+        alloc::alloc::Layout::from_size_align_unchecked(
+            config::TASK_STACK_SIZE,
+            config::TASK_STACK_ALIGN,
+        )
+    };
 
     // --- Task 0: user_echo_task ---
     // SAFETY: Layout is non-zero-sized; allocator is initialized above.
     let stack0_bottom = unsafe { alloc::alloc::alloc(stack_layout) } as u64;
-    let stack0_top = stack0_bottom + 8192;
+    let stack0_top = stack0_bottom + config::TASK_STACK_SIZE as u64;
 
     // SAFETY: _user_text_start is a valid linker symbol address.
     let user_text_base = &raw const _user_text_start as u64;
 
-    let task0_id = scheduler::create_task(
+    let task0_pmp = sched::PmpConfig::builder()
+        .code_region(user_text_base, 0x1000)
+        .stack_region(stack0_bottom, 0x2000)
+        // UART MMIO (RW, 4 KB) — echo task needs UART access via syscall path.
+        .mmio_region(config::UART_BASE as u64, 0x1000)
+        .build();
+
+    let task0_id = sched::create_task(
         user_task::user_echo_task as *const () as u64,
         stack0_top,
-        &{
-            let mut regions = [pmp::PmpRegion::new(0, 0, 0); 16];
-            // Entry 4: user code section (RX, 4 KB, NAPOT).
-            regions[4] = pmp::PmpRegion::new(user_text_base, 0x0000_1000, pmp::flags::RX);
-            // Entry 5: user stack (RW, 8 KB, NAPOT, 8 KB aligned by stack_layout).
-            regions[5] = pmp::PmpRegion::new(stack0_bottom, 0x0000_2000, pmp::flags::RW);
-            // Entry 6: UART MMIO (RW, 4 KB) — echo task needs UART access via syscall path.
-            regions[6] = pmp::PmpRegion::new(0x1000_0000, 0x0000_1000, pmp::flags::RW);
-            regions
-        },
+        &task0_pmp.regions,
     );
     serial::puts("[sched] task created: ");
     serial::put_dec(task0_id.0 as u64);
@@ -125,28 +137,26 @@ extern "C" fn kmain() -> ! {
     // --- Task 1: user_violation_task ---
     // SAFETY: Layout is non-zero-sized; allocator is initialized above.
     let stack1_bottom = unsafe { alloc::alloc::alloc(stack_layout) } as u64;
-    let stack1_top = stack1_bottom + 8192;
+    let stack1_top = stack1_bottom + config::TASK_STACK_SIZE as u64;
 
-    let task1_id = scheduler::create_task(
+    let task1_pmp = sched::PmpConfig::builder()
+        .code_region(user_text_base, 0x1000)
+        // No UART entry — violation task intentionally reads kernel memory instead.
+        .stack_region(stack1_bottom, 0x2000)
+        .build();
+
+    let task1_id = sched::create_task(
         user_task::user_violation_task as *const () as u64,
         stack1_top,
-        &{
-            let mut regions = [pmp::PmpRegion::new(0, 0, 0); 16];
-            // Entry 4: user code section (RX, 4 KB) — violation task runs from user_text.
-            regions[4] = pmp::PmpRegion::new(user_text_base, 0x0000_1000, pmp::flags::RX);
-            // Entry 5: user stack (RW, 8 KB, NAPOT, 8 KB aligned by stack_layout).
-            regions[5] = pmp::PmpRegion::new(stack1_bottom, 0x0000_2000, pmp::flags::RW);
-            // No UART entry — violation task intentionally reads kernel memory instead.
-            regions
-        },
+        &task1_pmp.regions,
     );
     serial::puts("[sched] task created: ");
     serial::put_dec(task1_id.0 as u64);
     serial::puts("\n");
 
-    scheduler::init();
+    sched::init();           // register tasks with the round-robin scheduler
 
-    timer::enable_interrupts();
+    timer::enable_interrupts(); // unmask mstatus.MIE — scheduler starts firing
 
     serial::puts("[kernel] Scheduler started, entering idle loop\n");
     loop {

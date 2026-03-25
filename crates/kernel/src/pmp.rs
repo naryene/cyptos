@@ -23,7 +23,7 @@ pub mod flags {
 }
 
 /// Maximum number of PMP entries (RV64 supports up to 64, QEMU virt has 16)
-pub const PMP_COUNT: usize = 16;
+pub use crate::config::PMP_COUNT;
 
 /// PMP region descriptor
 #[derive(Debug, Clone, Copy)]

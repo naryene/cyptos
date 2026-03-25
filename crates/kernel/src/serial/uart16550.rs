@@ -2,7 +2,7 @@ use core::ptr::{read_volatile, write_volatile};
 
 // The base memory address of the UART peripheral. All register accesses are
 // offsets from this address. 0x1000_0000 is the UART address on QEMU's RISC-V virt machine.
-const UART_BASE: usize = 0x1000_0000;
+use crate::config::UART_BASE;
 
 // Transmit Holding Register — write a byte here to send it out over the serial line.
 // Only valid when DLAB = 0.
@@ -51,6 +51,7 @@ const LCR_8BIT: u8 = 0b0000_0011;
 // Must be cleared back to 0 before normal data transmission/reception.
 const LCR_DLAB: u8 = 0b0000_0001 << 7;
 
+/// Initialize the UART: disable interrupts, set baud divisor, configure 8N1, enable FIFOs.
 pub fn init() {
     unsafe {
         let base = UART_BASE as *mut u8;
@@ -63,6 +64,7 @@ pub fn init() {
     }
 }
 
+/// Write one byte to the UART, spinning until the transmit buffer is ready.
 pub fn putc(c: u8) {
     unsafe {
         let base = UART_BASE as *mut u8;
@@ -71,6 +73,7 @@ pub fn putc(c: u8) {
     }
 }
 
+/// Write a string slice to the UART, translating `\n` to `\r\n`.
 pub fn puts(s: &str) {
     for c in s.bytes() {
         if c == b'\n' {
@@ -80,6 +83,7 @@ pub fn puts(s: &str) {
     }
 }
 
+/// Write a decimal integer to the UART.
 pub fn put_dec(mut n: u64) {
     if n == 0 {
         putc(b'0');
@@ -98,6 +102,7 @@ pub fn put_dec(mut n: u64) {
     }
 }
 
+/// Write a hex integer to the UART, prefixed with `0x`.
 #[allow(dead_code)]
 pub fn put_hex(mut n: u64) {
     puts("0x");
@@ -119,6 +124,7 @@ pub fn put_hex(mut n: u64) {
     }
 }
 
+/// Read one byte from the UART, blocking until data is available.
 #[allow(dead_code)]
 pub fn getc() -> u8 {
     unsafe {

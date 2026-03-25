@@ -1,3 +1,9 @@
+//! Serial I/O abstraction with compile-time backend selection.
+//!
+//! The active UART driver is chosen via Cargo features: `serial-uart16550` for
+//! the NS16550A on QEMU virt, or `serial-usart-stm32` for STM32 hardware (stub).
+//! All kernel code calls `serial::puts()`, `serial::putc()`, etc. without knowing
+//! which backend is active.
 #![allow(unused_imports)]
 #[cfg(feature = "serial-uart16550")]
 pub mod uart16550;
