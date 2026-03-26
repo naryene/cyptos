@@ -5,7 +5,7 @@
 
 use core::ptr::{read_volatile, write_volatile};
 
-use crate::config::{CLINT_BASE, MTIME_OFFSET, MTIMECMP_OFFSET, TIMER_FREQ_HZ, TICK_INTERVAL_US};
+use crate::config::{CLINT_BASE, MTIME_OFFSET, MTIMECMP_OFFSET, TICK_INTERVAL_US, TIMER_FREQ_HZ};
 use crate::sync::AtomicCounter;
 
 /// Read current mtime value

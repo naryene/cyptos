@@ -9,7 +9,7 @@
 //! and `atomic_t` for simple counters. When multi-hart support is added, `IrqCell`
 //! will need to be upgraded to a spinlock.
 
-pub mod irq_cell;
 pub mod atomic_counter;
-pub use irq_cell::IrqCell;
+pub mod irq_cell;
 pub use atomic_counter::AtomicCounter;
+pub use irq_cell::IrqCell;

@@ -3,9 +3,9 @@
 //! Manages a static task table and selects the next runnable task on each
 //! timer tick. Called from the machine-mode timer ISR in trap.rs.
 
+use super::task::{MAX_TASKS, PmpConfig, Task, TaskId, TaskState};
 use crate::pmp::PmpRegion;
 use crate::sync::IrqCell;
-use super::task::{MAX_TASKS, PmpConfig, Task, TaskId, TaskState};
 
 struct SchedulerState {
     current: usize,
@@ -13,7 +13,7 @@ struct SchedulerState {
 }
 
 static SCHEDULER: IrqCell<SchedulerState> = IrqCell::new(SchedulerState {
-    current: usize::MAX,
+    current: 0, // Idle task is always slot 0.
     tasks: [None, None, None, None],
 });
 
@@ -58,30 +58,24 @@ pub fn schedule(frame: &mut crate::trap::TrapFrame) {
     switch_target = SCHEDULER.with_lock(|state| {
         let current = state.current;
 
-        // --- Step 1: save current task context if one is running ---
-        if current != usize::MAX {
-            if let Some(task) = &mut state.tasks[current] {
-                let ctx = &mut task.context;
+        // --- Step 1: save current task context ---
+        if let Some(task) = &mut state.tasks[current] {
+            let ctx = &mut task.context;
 
-                // Copy 31 GPRs from TrapFrame into TaskContext.
-                crate::arch::register::copy_gpr_fields!(frame, ctx);
-                ctx.mepc = mepc;
-                ctx.mstatus = mstatus;
+            // Copy 31 GPRs from TrapFrame into TaskContext.
+            crate::arch::register::copy_gpr_fields!(frame, ctx);
+            ctx.mepc = mepc;
+            ctx.mstatus = mstatus;
 
-                // Preserve Dead state — only transition Running→Ready.
-                if task.state == TaskState::Running {
-                    task.state = TaskState::Ready;
-                }
+            // Preserve Dead state — only transition Running→Ready.
+            if task.state == TaskState::Running {
+                task.state = TaskState::Ready;
             }
         }
 
         // --- Step 2: find next Ready task (round-robin) ---
         // Start search at the slot after the current one to ensure fairness.
-        let start = if current == usize::MAX {
-            0
-        } else {
-            (current + 1) % MAX_TASKS
-        };
+        let start = (current + 1) % MAX_TASKS;
 
         let mut next_idx: Option<usize> = None;
         for i in 0..MAX_TASKS {
@@ -155,6 +149,24 @@ pub fn create_task(entry: u64, stack_top: u64, pmp_regions: &[PmpRegion]) -> Tas
     })
 }
 
+/// Create a new M-mode task (e.g. idle task) with no PMP regions.
+///
+/// Uses `TaskContext::new_mmode` so `mret` returns to M-mode (MPP=11).
+pub fn create_task_mmode(entry: u64, stack_top: u64) -> TaskId {
+    SCHEDULER.with_lock(|state| {
+        #[allow(clippy::needless_range_loop)]
+        for idx in 0..MAX_TASKS {
+            if state.tasks[idx].is_none() {
+                let mut task = Task::new(TaskId(idx as u8), entry, stack_top);
+                task.context = super::task::TaskContext::new_mmode(entry, stack_top);
+                state.tasks[idx] = Some(task);
+                return TaskId(idx as u8);
+            }
+        }
+        panic!("task table full");
+    })
+}
+
 /// Kill the currently running task and immediately schedule the next ready task.
 ///
 /// Sets the current task's state to `Dead` so the round-robin loop skips it,
@@ -163,13 +175,11 @@ pub fn create_task(entry: u64, stack_top: u64, pmp_regions: &[PmpRegion]) -> Tas
 pub fn kill_current(frame: &mut crate::trap::TrapFrame) {
     SCHEDULER.with_lock(|state| {
         let current = state.current;
-        if current != usize::MAX {
-            if let Some(task) = &mut state.tasks[current] {
-                task.state = TaskState::Dead;
-                crate::serial::puts("[sched] task killed: ");
-                crate::serial::put_dec(current as u64);
-                crate::serial::puts("\n");
-            }
+        if let Some(task) = &mut state.tasks[current] {
+            task.state = TaskState::Dead;
+            crate::serial::puts("[sched] task killed: ");
+            crate::serial::put_dec(current as u64);
+            crate::serial::puts("\n");
         }
     });
     // Schedule the next ready task (or remain idle if none).

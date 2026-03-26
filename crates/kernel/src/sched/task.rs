@@ -68,6 +68,49 @@ pub struct TaskContext {
 }
 
 impl TaskContext {
+    /// Create a zeroed task context suitable for a new M-mode task (e.g. idle task).
+    ///
+    /// Sets mepc to `entry_point` and mstatus to MPP=11 (M-mode) with MPIE=1.
+    pub const fn new_mmode(entry_point: u64, stack_top: u64) -> Self {
+        // mstatus: MPP=11 (M-mode, bits 12:11), MPIE=1 (bit 7)
+        let mstatus = (0b11u64 << 11) | (1u64 << 7);
+        Self {
+            ra: 0,
+            t0: 0,
+            t1: 0,
+            t2: 0,
+            t3: 0,
+            t4: 0,
+            t5: 0,
+            t6: 0,
+            a0: 0,
+            a1: 0,
+            a2: 0,
+            a3: 0,
+            a4: 0,
+            a5: 0,
+            a6: 0,
+            a7: 0,
+            s0: 0,
+            s1: 0,
+            s2: 0,
+            s3: 0,
+            s4: 0,
+            s5: 0,
+            s6: 0,
+            s7: 0,
+            s8: 0,
+            s9: 0,
+            s10: 0,
+            s11: 0,
+            gp: 0,
+            tp: 0,
+            sp: stack_top,
+            mepc: entry_point,
+            mstatus,
+        }
+    }
+
     /// Create a zeroed task context suitable for a new U-mode task.
     ///
     /// Sets mepc to `entry_point` and mstatus to MPP=00 (U-mode) with MPIE=1.
@@ -174,7 +217,10 @@ impl PmpConfigBuilder {
     pub fn code_region(mut self, base: u64, size: u64) -> Self {
         assert!(self.next_idx < PMP_COUNT, "PMP region table full");
         assert!(size.is_power_of_two(), "PMP region size must be power of 2");
-        assert!(base & (size - 1) == 0, "PMP region base must be aligned to size");
+        assert!(
+            base & (size - 1) == 0,
+            "PMP region base must be aligned to size"
+        );
         self.regions[self.next_idx] = PmpRegion::new(base, size, crate::pmp::flags::RX);
         self.next_idx += 1;
         self
@@ -184,7 +230,10 @@ impl PmpConfigBuilder {
     pub fn stack_region(mut self, base: u64, size: u64) -> Self {
         assert!(self.next_idx < PMP_COUNT, "PMP region table full");
         assert!(size.is_power_of_two(), "PMP region size must be power of 2");
-        assert!(base & (size - 1) == 0, "PMP region base must be aligned to size");
+        assert!(
+            base & (size - 1) == 0,
+            "PMP region base must be aligned to size"
+        );
         self.regions[self.next_idx] = PmpRegion::new(base, size, crate::pmp::flags::RW);
         self.next_idx += 1;
         self
@@ -194,7 +243,10 @@ impl PmpConfigBuilder {
     pub fn mmio_region(mut self, base: u64, size: u64) -> Self {
         assert!(self.next_idx < PMP_COUNT, "PMP region table full");
         assert!(size.is_power_of_two(), "PMP region size must be power of 2");
-        assert!(base & (size - 1) == 0, "PMP region base must be aligned to size");
+        assert!(
+            base & (size - 1) == 0,
+            "PMP region base must be aligned to size"
+        );
         self.regions[self.next_idx] = PmpRegion::new(base, size, crate::pmp::flags::RW);
         self.next_idx += 1;
         self
@@ -204,7 +256,10 @@ impl PmpConfigBuilder {
     pub fn region(mut self, base: u64, size: u64, flags: u8) -> Self {
         assert!(self.next_idx < PMP_COUNT, "PMP region table full");
         assert!(size.is_power_of_two(), "PMP region size must be power of 2");
-        assert!(base & (size - 1) == 0, "PMP region base must be aligned to size");
+        assert!(
+            base & (size - 1) == 0,
+            "PMP region base must be aligned to size"
+        );
         self.regions[self.next_idx] = PmpRegion::new(base, size, flags);
         self.next_idx += 1;
         self
@@ -212,7 +267,9 @@ impl PmpConfigBuilder {
 
     /// Finalize the PMP configuration.
     pub fn build(self) -> PmpConfig {
-        PmpConfig { regions: self.regions }
+        PmpConfig {
+            regions: self.regions,
+        }
     }
 }
 

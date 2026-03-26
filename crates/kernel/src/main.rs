@@ -24,6 +24,15 @@ mod user_task;
 use core::arch::{asm, naked_asm};
 use core::panic::PanicInfo;
 
+/// Idle task entry point — runs in M-mode, loops on `wfi`.
+///
+/// The scheduler falls back to this task when no user task is Ready.
+fn idle_task_entry() -> ! {
+    loop {
+        unsafe { asm!("wfi") };
+    }
+}
+
 unsafe extern "C" {
     static _stack_top: u8;
     static _sbss: u8;
@@ -93,8 +102,8 @@ extern "C" fn kmain() -> ! {
         serial::puts("\n");
     }
 
-    trap::init();  // install mtvec handler
-    pmp::init();   // lock kernel memory regions
+    trap::init(); // install mtvec handler
+    pmp::init(); // lock kernel memory regions
     timer::init(); // arm CLINT and enable timer interrupt
 
     // Declare linker symbols for user text section bounds.
@@ -109,6 +118,15 @@ extern "C" fn kmain() -> ! {
             config::TASK_STACK_ALIGN,
         )
     };
+
+    // --- Idle task (M-mode, no PMP, always Ready) ---
+    let idle_stack_bottom = unsafe { alloc::alloc::alloc(stack_layout) } as u64;
+    let idle_stack_top = idle_stack_bottom + config::TASK_STACK_SIZE as u64;
+
+    let idle_id = sched::create_task_mmode(idle_task_entry as *const () as u64, idle_stack_top);
+    serial::puts("[sched] idle task created: ");
+    serial::put_dec(idle_id.0 as u64);
+    serial::puts("\n");
 
     // --- Task 0: user_echo_task ---
     // SAFETY: Layout is non-zero-sized; allocator is initialized above.
@@ -154,13 +172,16 @@ extern "C" fn kmain() -> ! {
     serial::put_dec(task1_id.0 as u64);
     serial::puts("\n");
 
-    sched::init();           // register tasks with the round-robin scheduler
+    sched::init(); // register tasks with the round-robin scheduler
 
     timer::enable_interrupts(); // unmask mstatus.MIE — scheduler starts firing
 
-    serial::puts("[kernel] Scheduler started, entering idle loop\n");
+    serial::puts("[kernel] Scheduler started — idle task handles wfi\n");
+    // The idle task (slot 0) now handles the wfi loop.
+    // The first timer tick will invoke the scheduler and pick a Ready task.
+    // kmain must still not return (it's a diverging function), so we wfi here
+    // until the first timer interrupt fires and switches to the idle task.
     loop {
-        // SAFETY: wfi is safe in M-mode.
         unsafe { asm!("wfi") };
     }
 }

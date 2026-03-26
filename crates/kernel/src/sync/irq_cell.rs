@@ -5,8 +5,8 @@
 //! scheduler) cannot preempt code that is modifying the task table.
 //! On a single-hart system this is sufficient for mutual exclusion.
 
-use core::cell::UnsafeCell;
 use core::arch::asm;
+use core::cell::UnsafeCell;
 
 /// Interrupt-safe cell for single-hart bare-metal use.
 /// Disables machine interrupts (MIE) during access, preventing
@@ -21,7 +21,9 @@ unsafe impl<T> Sync for IrqCell<T> {}
 
 impl<T> IrqCell<T> {
     pub const fn new(val: T) -> Self {
-        Self { inner: UnsafeCell::new(val) }
+        Self {
+            inner: UnsafeCell::new(val),
+        }
     }
 
     /// Execute `f` with interrupts disabled, then restore previous interrupt state.
