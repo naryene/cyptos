@@ -86,7 +86,9 @@ check:
 
 # Run clippy lints
 clippy:
-	$(DOCKER_RUN) cargo clippy --all-targets $(BUILD_STD) -- -D warnings
+	$(DOCKER_RUN) cargo clippy -p kernel $(BUILD_STD) -- -D warnings
+	$(DOCKER_RUN) cargo clippy -p cyptos-test -p cyptos-test-macros \
+		--target x86_64-unknown-linux-gnu --all-targets -- -D warnings
 
 # Generate documentation
 doc:

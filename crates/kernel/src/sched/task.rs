@@ -252,19 +252,6 @@ impl PmpConfigBuilder {
         self
     }
 
-    /// Add a region with custom flags.
-    pub fn region(mut self, base: u64, size: u64, flags: u8) -> Self {
-        assert!(self.next_idx < PMP_COUNT, "PMP region table full");
-        assert!(size.is_power_of_two(), "PMP region size must be power of 2");
-        assert!(
-            base & (size - 1) == 0,
-            "PMP region base must be aligned to size"
-        );
-        self.regions[self.next_idx] = PmpRegion::new(base, size, flags);
-        self.next_idx += 1;
-        self
-    }
-
     /// Finalize the PMP configuration.
     pub fn build(self) -> PmpConfig {
         PmpConfig {

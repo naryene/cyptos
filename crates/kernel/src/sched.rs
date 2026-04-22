@@ -9,4 +9,4 @@ mod scheduler;
 mod task;
 
 pub use scheduler::{create_task, create_task_mmode, init, kill_current, schedule};
-pub use task::{MAX_TASKS, PmpConfig, PmpConfigBuilder, Task, TaskContext, TaskId, TaskState};
+pub use task::{PmpConfig, TaskContext};

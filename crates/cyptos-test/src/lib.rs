@@ -283,6 +283,7 @@ mod task_tests {
     #[test]
     fn test_task_state_created_to_ready() {
         let mut state = TaskState::Created;
+        assert_eq!(state, TaskState::Created);
         state = TaskState::Ready;
         assert_eq!(state, TaskState::Ready);
     }
@@ -290,6 +291,7 @@ mod task_tests {
     #[test]
     fn test_task_state_ready_to_running() {
         let mut state = TaskState::Ready;
+        assert_eq!(state, TaskState::Ready);
         state = TaskState::Running;
         assert_eq!(state, TaskState::Running);
     }
@@ -297,6 +299,7 @@ mod task_tests {
     #[test]
     fn test_task_state_running_to_dead() {
         let mut state = TaskState::Running;
+        assert_eq!(state, TaskState::Running);
         state = TaskState::Dead;
         assert_eq!(state, TaskState::Dead);
     }
@@ -304,6 +307,7 @@ mod task_tests {
     #[test]
     fn test_task_state_running_to_ready() {
         let mut state = TaskState::Running;
+        assert_eq!(state, TaskState::Running);
         state = TaskState::Ready;
         assert_eq!(state, TaskState::Ready);
     }
