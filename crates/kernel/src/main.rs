@@ -7,6 +7,8 @@
 //! scheduling is driven by the timer ISR in `trap.rs`.
 #![no_std]
 #![no_main]
+#![feature(allocator_api)]
+#![feature(slice_ptr_get)]
 
 extern crate alloc;
 
@@ -21,6 +23,8 @@ mod timer;
 mod trap;
 mod user_task;
 
+use alloc::alloc::{Allocator, Global};
+use core::alloc::Layout;
 use core::arch::{asm, naked_asm};
 use core::panic::PanicInfo;
 
@@ -81,13 +85,17 @@ extern "C" fn clear_bss() {
     }
 }
 
-#[unsafe(no_mangle)]
-extern "C" fn kmain() -> ! {
+// Helpers
+//
+
+fn print_banner() {
     serial::init();
     serial::puts("CyptOS v0.1.0\n");
     serial::puts("RV64 bare-metal microkernel\n");
     serial::puts("----------------------------\n");
+}
 
+fn init_heap() {
     // Initialize heap allocator
     let heap_start = &raw const _sheap as usize;
     let heap_end = &raw const _eheap as usize;
@@ -101,6 +109,79 @@ extern "C" fn kmain() -> ! {
         serial::put_dec(v.len() as u64);
         serial::puts("\n");
     }
+}
+
+fn alloc_task_stack(layout: &Layout) -> (u64, u64) {
+    let ptr = unsafe { Global.allocate(*layout) }
+        .expect("allocating stack")
+        .as_mut_ptr() as u64;
+    (ptr, ptr + config::TASK_STACK_SIZE as u64)
+}
+
+fn spawn_idle_task(layout: &Layout) {
+    // --- Idle task (M-mode, no PMP, always Ready) ---
+    let (_, idle_stack_top) = alloc_task_stack(layout);
+
+    let idle_id = sched::create_task_mmode(idle_task_entry as *const () as u64, idle_stack_top);
+    serial::puts("[sched] idle task created: ");
+    serial::put_dec(idle_id.0 as u64);
+    serial::puts("\n");
+}
+
+fn spawn_echo_task((stack_bottom, stack_top): (u64, u64), user_text_base: u64) {
+    let task0_pmp = sched::PmpConfig::builder()
+        .code_region(user_text_base, 0x1000)
+        .stack_region(stack_bottom, 0x2000)
+        // UART MMIO (RW, 4 KB) — echo task needs UART access via syscall path.
+        .mmio_region(config::UART_BASE as u64, 0x1000)
+        .build();
+
+    let task0_id = sched::create_task(
+        user_task::user_echo_task as *const () as u64,
+        stack_top,
+        &task0_pmp.regions,
+    );
+    serial::puts("[sched] task created: ");
+    serial::put_dec(task0_id.0 as u64);
+    serial::puts("\n");
+}
+
+fn spawn_violation_task((stack_bottom, stack_top): (u64, u64), user_text_base: u64) {
+    let task1_pmp = sched::PmpConfig::builder()
+        .code_region(user_text_base, 0x1000)
+        // No UART entry — violation task intentionally reads kernel memory instead.
+        .stack_region(stack_bottom, 0x2000)
+        .build();
+
+    let task1_id = sched::create_task(
+        user_task::user_violation_task as *const () as u64,
+        stack_top,
+        &task1_pmp.regions,
+    );
+    serial::puts("[sched] task created: ");
+    serial::put_dec(task1_id.0 as u64);
+    serial::puts("\n");
+}
+
+fn start_scheduler() -> ! {
+    sched::init(); // register tasks with the round-robin scheduler
+
+    timer::enable_interrupts(); // unmask mstatus.MIE — scheduler starts firing
+
+    serial::puts("[kernel] Scheduler started — idle task handles wfi\n");
+    // The idle task (slot 0) now handles the wfi loop.
+    // The first timer tick will invoke the scheduler and pick a Ready task.
+    // kmain must still not return (it's a diverging function), so we wfi here
+    // until the first timer interrupt fires and switches to the idle task.
+    loop {
+        unsafe { asm!("wfi") };
+    }
+}
+#[unsafe(no_mangle)]
+extern "C" fn kmain() -> ! {
+    print_banner();
+
+    init_heap();
 
     trap::init(); // install mtvec handler
     pmp::init(); // lock kernel memory regions
@@ -119,71 +200,21 @@ extern "C" fn kmain() -> ! {
         )
     };
 
-    // --- Idle task (M-mode, no PMP, always Ready) ---
-    let idle_stack_bottom = unsafe { alloc::alloc::alloc(stack_layout) } as u64;
-    let idle_stack_top = idle_stack_bottom + config::TASK_STACK_SIZE as u64;
-
-    let idle_id = sched::create_task_mmode(idle_task_entry as *const () as u64, idle_stack_top);
-    serial::puts("[sched] idle task created: ");
-    serial::put_dec(idle_id.0 as u64);
-    serial::puts("\n");
+    spawn_idle_task(&stack_layout);
 
     // --- Task 0: user_echo_task ---
     // SAFETY: Layout is non-zero-sized; allocator is initialized above.
-    let stack0_bottom = unsafe { alloc::alloc::alloc(stack_layout) } as u64;
-    let stack0_top = stack0_bottom + config::TASK_STACK_SIZE as u64;
-
+    let (stack0_bottom, stack0_top) = alloc_task_stack(&stack_layout);
     // SAFETY: _user_text_start is a valid linker symbol address.
     let user_text_base = &raw const _user_text_start as u64;
-
-    let task0_pmp = sched::PmpConfig::builder()
-        .code_region(user_text_base, 0x1000)
-        .stack_region(stack0_bottom, 0x2000)
-        // UART MMIO (RW, 4 KB) — echo task needs UART access via syscall path.
-        .mmio_region(config::UART_BASE as u64, 0x1000)
-        .build();
-
-    let task0_id = sched::create_task(
-        user_task::user_echo_task as *const () as u64,
-        stack0_top,
-        &task0_pmp.regions,
-    );
-    serial::puts("[sched] task created: ");
-    serial::put_dec(task0_id.0 as u64);
-    serial::puts("\n");
+    spawn_echo_task((stack0_bottom, stack0_top), user_text_base);
 
     // --- Task 1: user_violation_task ---
     // SAFETY: Layout is non-zero-sized; allocator is initialized above.
-    let stack1_bottom = unsafe { alloc::alloc::alloc(stack_layout) } as u64;
-    let stack1_top = stack1_bottom + config::TASK_STACK_SIZE as u64;
+    let (stack1_bottom, stack1_top) = alloc_task_stack(&stack_layout);
+    spawn_violation_task((stack1_bottom, stack1_top), user_text_base);
 
-    let task1_pmp = sched::PmpConfig::builder()
-        .code_region(user_text_base, 0x1000)
-        // No UART entry — violation task intentionally reads kernel memory instead.
-        .stack_region(stack1_bottom, 0x2000)
-        .build();
-
-    let task1_id = sched::create_task(
-        user_task::user_violation_task as *const () as u64,
-        stack1_top,
-        &task1_pmp.regions,
-    );
-    serial::puts("[sched] task created: ");
-    serial::put_dec(task1_id.0 as u64);
-    serial::puts("\n");
-
-    sched::init(); // register tasks with the round-robin scheduler
-
-    timer::enable_interrupts(); // unmask mstatus.MIE — scheduler starts firing
-
-    serial::puts("[kernel] Scheduler started — idle task handles wfi\n");
-    // The idle task (slot 0) now handles the wfi loop.
-    // The first timer tick will invoke the scheduler and pick a Ready task.
-    // kmain must still not return (it's a diverging function), so we wfi here
-    // until the first timer interrupt fires and switches to the idle task.
-    loop {
-        unsafe { asm!("wfi") };
-    }
+    start_scheduler()
 }
 
 #[panic_handler]
