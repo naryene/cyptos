@@ -5,7 +5,7 @@
 
 use core::ptr::{read_volatile, write_volatile};
 
-use crate::config::{CLINT_BASE, MTIME_OFFSET, MTIMECMP_OFFSET, TIMER_FREQ_HZ, TICK_INTERVAL_US};
+use crate::config::{CLINT_BASE, MTIME_OFFSET, MTIMECMP_OFFSET, TICK_INTERVAL_US, TIMER_FREQ_HZ};
 use crate::sync::AtomicCounter;
 
 /// Read current mtime value
@@ -83,7 +83,8 @@ pub fn init() {
     enable_timer_interrupt();
     set_timer_us(TICK_INTERVAL_US);
 
-    crate::serial::puts("[timer] CLINT initialized, tick=");
-    crate::serial::put_dec(TICK_INTERVAL_US / 1000);
-    crate::serial::puts("ms\n");
+    crate::println!(
+        "[timer] CLINT initialized, tick={}ms",
+        TICK_INTERVAL_US / 1000
+    );
 }

@@ -3,17 +3,22 @@
 //! Manages a static task table and selects the next runnable task on each
 //! timer tick. Called from the machine-mode timer ISR in trap.rs.
 
+use super::policy::select_next_ready;
+use super::task::{MAX_TASKS, PmpConfig, Task, TaskId, TaskState};
 use crate::pmp::PmpRegion;
 use crate::sync::IrqCell;
-use super::task::{MAX_TASKS, PmpConfig, Task, TaskId, TaskState};
 
 struct SchedulerState {
-    current: usize,
+    /// The task whose context is currently executing.
+    ///
+    /// `None` represents the bootstrap `kmain` context before the first task
+    /// has been dispatched; it must never be saved into a task slot.
+    current: Option<usize>,
     tasks: [Option<Task>; MAX_TASKS],
 }
 
 static SCHEDULER: IrqCell<SchedulerState> = IrqCell::new(SchedulerState {
-    current: usize::MAX,
+    current: None,
     tasks: [None, None, None, None],
 });
 
@@ -44,8 +49,9 @@ pub fn init() {
 ///
 /// `frame`: the `TrapFrame` currently on the kernel stack, saved by `trap_vector`.
 ///
-/// If no ready task is found the function returns without modification (kernel
-/// stays in the idle loop).
+/// The first dispatch does not save the interrupted `kmain` context, leaving
+/// every prebuilt task context intact. Normal tasks are selected round-robin;
+/// idle slot 0 is used only when no non-idle task is ready.
 pub fn schedule(frame: &mut crate::trap::TrapFrame) {
     // Read mepc/mstatus CSRs before entering the lock (they don't need protection).
     let mepc: u64 = crate::arch::csr::mepc::read();
@@ -53,14 +59,14 @@ pub fn schedule(frame: &mut crate::trap::TrapFrame) {
 
     // Holds the pmp_regions and context of the next task to switch to.
     // Extracted inside the lock, applied outside.
-    let switch_target: Option<(usize, [PmpRegion; 16], super::task::TaskContext)>;
+    let switch_target: Option<(usize, [PmpRegion; 16], super::task::TaskContext)> = SCHEDULER
+        .with_lock(|state| {
+            let current = state.current;
 
-    switch_target = SCHEDULER.with_lock(|state| {
-        let current = state.current;
-
-        // --- Step 1: save current task context if one is running ---
-        if current != usize::MAX {
-            if let Some(task) = &mut state.tasks[current] {
+            // --- Step 1: save current task context ---
+            if let Some(current) = current
+                && let Some(task) = &mut state.tasks[current]
+            {
                 let ctx = &mut task.context;
 
                 // Copy 31 GPRs from TrapFrame into TaskContext.
@@ -73,44 +79,29 @@ pub fn schedule(frame: &mut crate::trap::TrapFrame) {
                     task.state = TaskState::Ready;
                 }
             }
-        }
 
-        // --- Step 2: find next Ready task (round-robin) ---
-        // Start search at the slot after the current one to ensure fairness.
-        let start = if current == usize::MAX {
-            0
-        } else {
-            (current + 1) % MAX_TASKS
-        };
+            // --- Step 2: find next Ready task ---
+            // Normal tasks use round-robin ordering. Idle slot 0 is fallback-only.
+            let next_idx = match select_next_ready::<MAX_TASKS>(current, |idx| {
+                state.tasks[idx]
+                    .as_ref()
+                    .is_some_and(|task| task.state == TaskState::Ready)
+            }) {
+                Some(idx) => idx,
+                None => return None,
+            };
 
-        let mut next_idx: Option<usize> = None;
-        for i in 0..MAX_TASKS {
-            let idx = (start + i) % MAX_TASKS;
-            if let Some(task) = &state.tasks[idx]
-                && task.state == TaskState::Ready
-            {
-                next_idx = Some(idx);
-                break;
+            // --- Step 3: mark next task as Running and update current ---
+            if let Some(task) = &mut state.tasks[next_idx] {
+                task.state = TaskState::Running;
             }
-        }
+            state.current = Some(next_idx);
 
-        let next_idx = match next_idx {
-            Some(idx) => idx,
-            None => return None, // No ready task — remain in kernel idle loop.
-        };
-
-        // --- Step 3: mark next task as Running and update current ---
-        if let Some(task) = &mut state.tasks[next_idx] {
-            task.state = TaskState::Running;
-        }
-        state.current = next_idx;
-
-        // Extract pmp_regions and context to apply outside the lock.
-        match &state.tasks[next_idx] {
-            Some(task) => Some((next_idx, task.pmp_config.regions, task.context)),
-            None => None,
-        }
-    });
+            // Extract pmp_regions and context to apply outside the lock.
+            state.tasks[next_idx]
+                .as_ref()
+                .map(|task| (next_idx, task.pmp_config.regions, task.context))
+        });
 
     // Apply the switch outside the lock (frame and CSR writes don't need it).
     if let Some((next_idx, pmp_regions, ctx)) = switch_target {
@@ -138,7 +129,7 @@ pub fn schedule(frame: &mut crate::trap::TrapFrame) {
 /// `entry` is the initial program counter (U-mode entry point).
 /// `stack_top` is the initial stack pointer.
 /// `pmp_regions` is a slice of up to 16 `PmpRegion` descriptors for this task.
-pub fn create_task(entry: u64, stack_top: u64, pmp_regions: &[PmpRegion]) -> TaskId {
+pub(super) fn create_task(entry: u64, stack_top: u64, pmp_regions: &[PmpRegion]) -> TaskId {
     SCHEDULER.with_lock(|state| {
         #[allow(clippy::needless_range_loop)]
         for idx in 0..MAX_TASKS {
@@ -155,6 +146,24 @@ pub fn create_task(entry: u64, stack_top: u64, pmp_regions: &[PmpRegion]) -> Tas
     })
 }
 
+/// Create a new M-mode task (e.g. idle task) with no PMP regions.
+///
+/// Uses `TaskContext::new_mmode` so `mret` returns to M-mode (MPP=11).
+pub(super) fn create_task_mmode(entry: u64, stack_top: u64) -> TaskId {
+    SCHEDULER.with_lock(|state| {
+        #[allow(clippy::needless_range_loop)]
+        for idx in 0..MAX_TASKS {
+            if state.tasks[idx].is_none() {
+                let mut task = Task::new(TaskId(idx as u8), entry, stack_top);
+                task.context = super::task::TaskContext::new_mmode(entry, stack_top);
+                state.tasks[idx] = Some(task);
+                return TaskId(idx as u8);
+            }
+        }
+        panic!("task table full");
+    })
+}
+
 /// Kill the currently running task and immediately schedule the next ready task.
 ///
 /// Sets the current task's state to `Dead` so the round-robin loop skips it,
@@ -162,14 +171,13 @@ pub fn create_task(entry: u64, stack_top: u64, pmp_regions: &[PmpRegion]) -> Tas
 /// the trap handler when a U-mode access fault is detected.
 pub fn kill_current(frame: &mut crate::trap::TrapFrame) {
     SCHEDULER.with_lock(|state| {
-        let current = state.current;
-        if current != usize::MAX {
-            if let Some(task) = &mut state.tasks[current] {
-                task.state = TaskState::Dead;
-                crate::serial::puts("[sched] task killed: ");
-                crate::serial::put_dec(current as u64);
-                crate::serial::puts("\n");
-            }
+        if let Some(current) = state.current
+            && let Some(task) = &mut state.tasks[current]
+        {
+            task.state = TaskState::Dead;
+            crate::serial::puts("[sched] task killed: ");
+            crate::serial::put_dec(current as u64);
+            crate::serial::puts("\n");
         }
     });
     // Schedule the next ready task (or remain idle if none).

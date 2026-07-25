@@ -85,7 +85,7 @@ pub enum Interrupt {
 pub fn init() {
     let trap_addr = trap_vector as *const () as u64;
     crate::arch::csr::mtvec::write(trap_addr);
-    crate::serial::puts("[trap] mtvec initialized\n");
+    crate::println!("[trap] mtvec initialized");
 }
 
 /// Read mcause CSR
@@ -234,9 +234,7 @@ fn handle_interrupt(cause: u64, frame: &mut TrapFrame) {
             let ticks = crate::timer::get_tick_count();
             // Print every 100 ticks (1 second at 10ms tick)
             if ticks.is_multiple_of(100) {
-                crate::serial::puts("[timer] tick ");
-                crate::serial::put_dec(ticks);
-                crate::serial::puts("\n");
+                crate::println!("[timer] tick {}", ticks);
             }
             crate::timer::schedule_next_tick();
             // Pass the mutable TrapFrame to the scheduler so it can switch tasks.
@@ -245,16 +243,14 @@ fn handle_interrupt(cause: u64, frame: &mut TrapFrame) {
         }
         11 => {
             // Machine external interrupt
-            crate::serial::puts("[trap] External interrupt\n");
+            crate::println!("[trap] External interrupt");
         }
         3 => {
             // Machine software interrupt
-            crate::serial::puts("[trap] Software interrupt\n");
+            crate::println!("[trap] Software interrupt");
         }
         _ => {
-            crate::serial::puts("[trap] Unknown interrupt: ");
-            crate::serial::put_dec(cause);
-            crate::serial::puts("\n");
+            crate::println!("[trap] Unknown interrupt: {}", cause);
         }
     }
 }
@@ -274,13 +270,12 @@ fn handle_access_fault(name: &str, mepc: u64, mtval: u64, frame: &mut TrapFrame)
     let mpp = read_mpp();
     if mpp == 0b00 {
         // U-mode access fault — log, kill the faulting task, schedule next.
-        crate::serial::puts("[trap] U-mode access fault: ");
-        crate::serial::puts(name);
-        crate::serial::puts(" at mepc=");
-        crate::serial::put_hex(mepc);
-        crate::serial::puts(" addr=");
-        crate::serial::put_hex(mtval);
-        crate::serial::puts("\n");
+        crate::println!(
+            "[trap] U-mode access fault: {} at mepc={:#x} addr={:#x}",
+            name,
+            mepc,
+            mtval
+        );
         crate::sched::kill_current(frame);
     } else {
         // M-mode access fault — kernel bug, panic.
@@ -302,12 +297,10 @@ fn handle_syscall(frame: &mut TrapFrame) {
         }
         crate::config::SYS_LEGACY_POC => {
             // Legacy POC syscall — kept for compatibility.
-            crate::serial::puts("[trap] U-mode POC ecall (legacy)\n");
+            crate::println!("[trap] U-mode POC ecall (legacy)");
         }
         _ => {
-            crate::serial::puts("[syscall] unknown: ");
-            crate::serial::put_dec(frame.a7);
-            crate::serial::puts("\n");
+            crate::println!("[syscall] unknown: {}", frame.a7);
         }
     }
 }
@@ -320,9 +313,7 @@ fn handle_exception(cause: u64, mepc: u64, mtval: u64, frame: &mut TrapFrame) {
         2 => panic_exception("Illegal instruction", mepc, mtval),
         3 => {
             // Breakpoint - advance pc past ebreak and continue
-            crate::serial::puts("[trap] Breakpoint at ");
-            crate::serial::put_hex(mepc);
-            crate::serial::puts("\n");
+            crate::println!("[trap] Breakpoint at {:#x}", mepc);
             write_mepc(mepc + 4); // ebreak is 4 bytes (compressed = 2)
         }
         4 => panic_exception("Load address misaligned", mepc, mtval),
@@ -335,23 +326,19 @@ fn handle_exception(cause: u64, mepc: u64, mtval: u64, frame: &mut TrapFrame) {
         }
         9 => {
             // Environment call from S-mode
-            crate::serial::puts("[trap] Ecall from S-mode\n");
+            crate::println!("[trap] Ecall from S-mode");
             write_mepc(mepc + 4);
         }
         11 => {
             // Environment call from M-mode
-            crate::serial::puts("[trap] Ecall from M-mode\n");
+            crate::println!("[trap] Ecall from M-mode");
             write_mepc(mepc + 4);
         }
         12 => panic_exception("Instruction page fault", mepc, mtval),
         13 => panic_exception("Load page fault", mepc, mtval),
         15 => panic_exception("Store page fault", mepc, mtval),
         _ => {
-            crate::serial::puts("[trap] Unknown exception: ");
-            crate::serial::put_dec(cause);
-            crate::serial::puts(" at ");
-            crate::serial::put_hex(mepc);
-            crate::serial::puts("\n");
+            crate::println!("[trap] Unknown exception: {} at {:#x}", cause, mepc);
             panic!("Unhandled exception");
         }
     }
@@ -359,13 +346,12 @@ fn handle_exception(cause: u64, mepc: u64, mtval: u64, frame: &mut TrapFrame) {
 
 /// Print exception info and panic
 fn panic_exception(name: &str, mepc: u64, mtval: u64) -> ! {
-    crate::serial::puts("[trap] FATAL: ");
-    crate::serial::puts(name);
-    crate::serial::puts("\n  mepc:  ");
-    crate::serial::put_hex(mepc);
-    crate::serial::puts("\n  mtval: ");
-    crate::serial::put_hex(mtval);
-    crate::serial::puts("\n");
+    crate::println!(
+        "[trap] FATAL: {}\n  mepc:  {:#x}\n  mtval: {:#x}",
+        name,
+        mepc,
+        mtval
+    );
     panic!("{}", name);
 }
 

@@ -24,6 +24,15 @@ pub const MAX_TASKS: usize = 4;
 pub const TASK_STACK_SIZE: usize = 8192;
 pub const TASK_STACK_ALIGN: usize = 8192;
 
+const _: () = assert!(
+    TASK_STACK_SIZE >= 8 && TASK_STACK_SIZE.is_power_of_two(),
+    "task stack size must be PMP-NAPOT-compatible"
+);
+const _: () = assert!(
+    TASK_STACK_ALIGN.is_power_of_two() && TASK_STACK_ALIGN >= TASK_STACK_SIZE,
+    "task stack alignment must be a power of two and at least the stack size"
+);
+
 // --- PMP ---
 pub const PMP_COUNT: usize = 16;
 

@@ -13,7 +13,9 @@ pub struct AtomicCounter {
 
 impl AtomicCounter {
     pub const fn new(val: u64) -> Self {
-        Self { inner: AtomicU64::new(val) }
+        Self {
+            inner: AtomicU64::new(val),
+        }
     }
 
     pub fn increment(&self) -> u64 {

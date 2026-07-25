@@ -39,8 +39,6 @@ macro_rules! csr_clear_bits {
 /// Machine Status register (mstatus): interrupt enable and privilege mode.
 pub mod mstatus {
     pub const MIE: u64 = 1 << 3;
-    pub const MPIE: u64 = 1 << 7;
-    pub const MPP_MASK: u64 = 0b11 << 11;
 
     pub fn read() -> u64 {
         csr_read!("mstatus")
@@ -63,12 +61,6 @@ pub mod mstatus {
 pub mod mcause {
     pub fn read() -> u64 {
         csr_read!("mcause")
-    }
-    pub fn is_interrupt(val: u64) -> bool {
-        (val >> 63) & 1 == 1
-    }
-    pub fn code(val: u64) -> u64 {
-        val & 0x7FFF_FFFF_FFFF_FFFF
     }
 }
 
@@ -99,9 +91,6 @@ pub mod mtvec {
 /// Machine Interrupt Enable (mie): individual interrupt enable bits.
 pub mod mie {
     pub const MTIE: u64 = 1 << 7;
-    pub fn read() -> u64 {
-        csr_read!("mie")
-    }
     pub fn enable_timer() {
         csr_set_bits!("mie", MTIE)
     }
