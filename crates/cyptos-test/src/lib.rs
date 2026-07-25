@@ -32,6 +32,10 @@
 
 pub use cyptos_test_macros::cyptos_test;
 
+#[cfg(test)]
+#[path = "../../kernel/src/sched/policy.rs"]
+mod scheduler_policy;
+
 pub trait Testable {
     fn run(&self);
 }

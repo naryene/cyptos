@@ -83,7 +83,8 @@ pub fn init() {
     enable_timer_interrupt();
     set_timer_us(TICK_INTERVAL_US);
 
-    crate::serial::puts("[timer] CLINT initialized, tick=");
-    crate::serial::put_dec(TICK_INTERVAL_US / 1000);
-    crate::serial::puts("ms\n");
+    crate::println!(
+        "[timer] CLINT initialized, tick={}ms",
+        TICK_INTERVAL_US / 1000
+    );
 }

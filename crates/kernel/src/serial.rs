@@ -5,6 +5,9 @@
 //! All kernel code calls `serial::puts()`, `serial::putc()`, etc. without knowing
 //! which backend is active.
 #![allow(unused_imports)]
+
+use core::fmt;
+
 #[cfg(feature = "serial-uart16550")]
 pub mod uart16550;
 
@@ -22,3 +25,19 @@ compile_error!("Select only one serial backend feature");
 
 #[cfg(not(any(feature = "serial-uart16550", feature = "serial-usart-stm32")))]
 compile_error!("Select a serial backend feature: serial-uart16550 or serial-usart-stm32");
+
+struct SerialWriter;
+
+impl fmt::Write for SerialWriter {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        puts(s);
+        Ok(())
+    }
+}
+
+pub fn write_fmt(args: fmt::Arguments<'_>) {
+    let mut writer = SerialWriter;
+    if fmt::write(&mut writer, args).is_err() {
+        unreachable!("serial writer cannot fail");
+    }
+}
